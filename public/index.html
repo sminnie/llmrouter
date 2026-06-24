@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>LLM Cost Router</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #0f1115;
+        --card: #181b22;
+        --border: #262a34;
+        --text: #e6e8ee;
+        --muted: #9aa1b1;
+        --accent: #4ade80;
+        --frontier: #f59e0b;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font-family: ui-sans-serif, system-ui, -apple-system, sans-serif;
+        background: var(--bg);
+        color: var(--text);
+      }
+      header { padding: 24px 32px; border-bottom: 1px solid var(--border); }
+      h1 { margin: 0; font-size: 20px; }
+      .sub { color: var(--muted); font-size: 13px; margin-top: 4px; }
+      main { padding: 24px 32px; display: grid; gap: 20px; max-width: 1100px; }
+      .cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; }
+      .card {
+        background: var(--card); border: 1px solid var(--border);
+        border-radius: 12px; padding: 18px;
+      }
+      .card .k { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+      .card .v { font-size: 28px; font-weight: 700; margin-top: 6px; }
+      .card .v.saved { color: var(--accent); }
+      .panel {
+        background: var(--card); border: 1px solid var(--border);
+        border-radius: 12px; padding: 18px;
+      }
+      .panel h2 { margin: 0 0 14px; font-size: 15px; }
+      table { width: 100%; border-collapse: collapse; font-size: 13px; }
+      th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); }
+      th { color: var(--muted); font-weight: 500; }
+      .pill { padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; }
+      .pill.cheap { background: rgba(74,222,128,.15); color: var(--accent); }
+      .pill.frontier { background: rgba(245,158,11,.15); color: var(--frontier); }
+      form { display: grid; gap: 10px; }
+      textarea, select, button {
+        font: inherit; background: #10131a; color: var(--text);
+        border: 1px solid var(--border); border-radius: 8px; padding: 10px;
+      }
+      textarea { min-height: 80px; resize: vertical; }
+      .row { display: flex; gap: 10px; align-items: center; }
+      button {
+        cursor: pointer; background: var(--accent); color: #08130b;
+        font-weight: 700; border: none;
+      }
+      button:disabled { opacity: .6; cursor: default; }
+      pre {
+        background: #10131a; border: 1px solid var(--border); border-radius: 8px;
+        padding: 12px; overflow: auto; font-size: 12px; white-space: pre-wrap;
+      }
+      .muted { color: var(--muted); }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>LLM Cost Router</h1>
+      <div class="sub">Heuristic prompt routing &middot; cheap vs frontier &middot; live savings</div>
+    </header>
+    <main>
+      <section class="cards">
+        <div class="card"><div class="k">Total Saved</div><div class="v saved" id="saved">$0.00</div></div>
+        <div class="card"><div class="k">Requests</div><div class="v" id="count">0</div></div>
+        <div class="card"><div class="k">Would-be Cost</div><div class="v" id="baseline">$0.00</div></div>
+        <div class="card"><div class="k">Cheap / Frontier</div><div class="v" id="split">0 / 0</div></div>
+      </section>
+
+      <section class="panel">
+        <h2>Try it</h2>
+        <form id="try">
+          <textarea id="prompt" placeholder="e.g. Classify this review as positive or negative: 'Loved it!'"></textarea>
+          <div class="row">
+            <select id="strategy">
+              <option value="default">default</option>
+              <option value="cost-optimized">cost-optimized</option>
+              <option value="latency-first">latency-first</option>
+              <option value="quality">quality</option>
+            </select>
+            <button type="submit" id="send">Send</button>
+            <span class="muted" id="status"></span>
+          </div>
+        </form>
+        <pre id="out" style="display:none"></pre>
+      </section>
+
+      <section class="panel">
+        <h2>Recent requests</h2>
+        <table>
+          <thead>
+            <tr><th>Time</th><th>Tier</th><th>Model</th><th>Strategy</th><th>Score</th><th>Saved</th></tr>
+          </thead>
+          <tbody id="rows"></tbody>
+        </table>
+      </section>
+    </main>
+
+    <script>
+      const money = (n) => "$" + Number(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 6 });
+
+      async function refresh() {
+        try {
+          const res = await fetch("/metrics?limit=25");
+          const { summary, recent } = await res.json();
+          document.getElementById("saved").textContent = money(summary.total_savings_usd);
+          document.getElementById("count").textContent = summary.total_requests;
+          document.getElementById("baseline").textContent = money(summary.total_baseline_usd);
+          const cheap = summary.by_tier.cheap ?? 0;
+          const frontier = summary.by_tier.frontier ?? 0;
+          document.getElementById("split").textContent = `${cheap} / ${frontier}`;
+
+          document.getElementById("rows").innerHTML = recent
+            .map(
+              (r) => `<tr>
+                <td class="muted">${new Date(r.ts).toLocaleTimeString()}</td>
+                <td><span class="pill ${r.tier}">${r.tier}</span></td>
+                <td>${r.model_selected}</td>
+                <td class="muted">${r.strategy}</td>
+                <td>${r.complexity.toFixed(3)}</td>
+                <td>${money(r.savings_usd)}</td>
+              </tr>`,
+            )
+            .join("");
+        } catch (e) {
+          /* server may be starting */
+        }
+      }
+
+      document.getElementById("try").addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const btn = document.getElementById("send");
+        const status = document.getElementById("status");
+        const out = document.getElementById("out");
+        const prompt = document.getElementById("prompt").value.trim();
+        if (!prompt) return;
+        btn.disabled = true;
+        const started = Date.now();
+        const timer = setInterval(() => {
+          status.textContent = `routing… ${((Date.now() - started) / 1000).toFixed(1)}s`;
+        }, 100);
+        try {
+          const res = await fetch("/route", {
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              "x-strategy": document.getElementById("strategy").value,
+            },
+            body: JSON.stringify({ prompt }),
+          });
+          const data = await res.json();
+          if (!res.ok) {
+            throw new Error(data.error ?? `request failed (${res.status})`);
+          }
+          out.style.display = "block";
+          out.textContent = typeof data.response === "string" ? data.response : "No response text returned.";
+          status.textContent = `${data.tier} → ${data.model} (saved ${money(data.cost?.savings_usd ?? 0)})`;
+          refresh();
+        } catch (err) {
+          status.textContent = "error: " + err.message;
+        } finally {
+          clearInterval(timer);
+          btn.disabled = false;
+        }
+      });
+
+      refresh();
+      setInterval(refresh, 2000);
+    </script>
+  </body>
+</html>
