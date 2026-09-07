@@ -1,8 +1,42 @@
 # llmrouter
 
-A lightweight API proxy that routes LLM prompts to the **cheapest model that can do the job**.
+**Cut LLM spend 36% — automatically.** A lightweight API proxy that routes every prompt to
+the **cheapest model that can do the job**, with an audited savings ledger for every call.
+
 Simple prompts (classify, format, extract) go to a small/cheap model; complex, multi-step
-reasoning goes to a frontier model. Every response reports how much money the routing saved.
+reasoning escalates to a frontier model. Every response reports how much money the routing saved.
+
+![LLM Router — 36.12% measured savings](proof-pack/preview.png)
+
+## Measured results (MVP validation sample)
+
+| Metric | Value |
+|---|---:|
+| Savings rate vs frontier-only baseline | **36.12%** |
+| Traffic safely routed to cheap tier | **57%** |
+| Complexity separation (avg score, cheap vs frontier) | **0.18 vs 0.69** |
+| Baseline spend / actual savings | $0.0195 / $0.0070 |
+
+Numbers are computed from the append-only log in `data/metrics.jsonl` — every request records
+its complexity score, model selected, baseline cost, and savings. Reproduce them yourself:
+run the server, send traffic, read `GET /metrics`.
+
+The complexity separation is the honest-signal check: routing isn't random. Cheap-tier
+requests average 0.18 complexity; frontier-tier requests average 0.69.
+
+> This is an early sample (single-user MVP traffic). Next milestone: a reproducible
+> 100–500 prompt benchmark with side-by-side quality evals — see [Roadmap](#roadmap).
+
+## Why this matters
+
+Public model pricing spreads are multi-x within the same provider family (25x between
+top-tier and budget models is common). Most teams default all workloads to expensive
+frontier models. Even moderate routing accuracy converts that price spread directly
+into margin — **if** you can prove quality is preserved and audit every decision.
+
+llmrouter is built around that proof: **counterfactual cost accounting**. Savings are
+never estimated — each request logs the cost of the frontier model you *would* have paid
+minus the cost of the model actually used, priced from [src/pricing.ts](src/pricing.ts).
 
 ## How it works
 
@@ -20,8 +54,14 @@ POST /route  ──►  classifier (token length + keyword scoring)
    JSON response + X-Savings-USD / X-Model-Selected / X-Complexity-Score
 ```
 
-Savings are **counterfactual**: the cost of sending the call to the frontier model minus
-the cost of the model actually used, priced from `src/pricing.ts`.
+1. **Score** — [src/router/classifier.ts](src/router/classifier.ts) scores prompt complexity
+   in real time (token length + reasoning-keyword signals).
+2. **Route** — [src/router/strategy.ts](src/router/strategy.ts) maps score → tier. The
+   `X-Strategy` header (`cost-optimized | latency-first | quality | default`) shifts the
+   threshold per request, so callers control the cost/quality tradeoff.
+3. **Account** — [src/savings.ts](src/savings.ts) computes counterfactual savings;
+   every decision and dollar delta lands in an append-only audit stream.
+4. **Observe** — live savings dashboard at `/` and aggregates at `GET /metrics`.
 
 ## Quick start (local, free — Ollama)
 
@@ -103,10 +143,19 @@ npm test
 
 ## Design notes
 
-- **Provider layer** is pluggable via a single `ProviderAdapter` interface (`src/providers`).
+- **Provider layer** is pluggable via a single `ProviderAdapter` interface
+  ([src/providers](src/providers)). Adding a provider means implementing one interface.
 - **Persistence** is behind a `MetricsStore` interface; the default `JsonlMetricsStore`
   is an append-only log (`data/metrics.jsonl`) with an in-memory aggregate — durable across
   restarts, zero native deps. Swap for SQLite/Postgres without touching routing.
+- **Auditability first** — the savings ledger is designed so a finance or platform team
+  can verify every routing decision after the fact. Cost governance, not just cost cutting.
+
+## Roadmap
+
+1. Reproducible 100–500 prompt benchmark pack on representative prompt mixes.
+2. Side-by-side quality evals (cheap tier vs frontier tier) on a fixed gold set.
+3. Target: ≥ 25% savings at stable quality on the benchmark set.
 
 ## Out of scope (MVP)
 
